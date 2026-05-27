@@ -2,8 +2,8 @@ function getConfig() {
   const params = new URLSearchParams(window.location.search);
 
   const provider = (params.get("provider") || "tenor") as "tenor" | "giphy";
-  const apiKey = params.get("apiKey") || import.meta.env.VITE_GIF_API_KEY || "";
-  const explicitProxyUrl = params.get("proxyUrl") || import.meta.env.VITE_GIF_PROXY_URL || undefined;
+  const apiKey = import.meta.env.VITE_GIF_API_KEY || "";
+  const explicitProxyUrl = import.meta.env.VITE_GIF_PROXY_URL || undefined;
 
   const proxyUrl = explicitProxyUrl || (apiKey ? undefined : `${window.location.origin}`);
 

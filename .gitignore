@@ -6,9 +6,9 @@ node_modules/
 /dist-ssr
 
 # env files
-.env
-.env.local
-.env.*.local
+**/.env
+**/.env.*
+!.env.example
 
 # editor
 *.vscode/

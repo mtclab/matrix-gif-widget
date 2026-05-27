@@ -11,4 +11,6 @@ services:
       - TENOR_API_KEY=${TENOR_API_KEY:-}
       - GIPHY_API_KEY=${GIPHY_API_KEY:-}
       - PORT=3000
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
+      - FRAME_ANCESTORS=${FRAME_ANCESTORS:-'self'}
     restart: unless-stopped

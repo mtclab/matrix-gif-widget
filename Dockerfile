@@ -13,7 +13,9 @@ FROM node:22-alpine
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev && \
+    addgroup -g 1001 appgroup && \
+    adduser -u 1001 -G appgroup -s /bin/sh -D appuser
 
 COPY server.mjs ./
 
@@ -22,6 +24,7 @@ ARG VITE_GIF_PROXY_URL=""
 
 COPY --from=build /app/dist ./dist
 
+USER appuser
 ENV PORT=3000
 EXPOSE 3000
 
