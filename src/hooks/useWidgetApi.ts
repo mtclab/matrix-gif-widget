@@ -24,6 +24,7 @@ export interface WidgetApiState {
 
 type Action =
   | { type: "INIT"; api: WidgetApi; userId: string | null; roomId: string | null }
+  | { type: "READY" }
   | { type: "ERROR"; error: string }
   | { type: "THEME"; theme: "light" | "dark" };
 
@@ -39,7 +40,9 @@ const initState: WidgetApiState = {
 function reducer(state: WidgetApiState, action: Action): WidgetApiState {
   switch (action.type) {
     case "INIT":
-      return { ...state, api: action.api, ready: true, userId: action.userId, roomId: action.roomId };
+      return { ...state, api: action.api, userId: action.userId, roomId: action.roomId };
+    case "READY":
+      return { ...state, ready: true };
     case "ERROR":
       return { ...state, error: action.error };
     case "THEME":
@@ -101,8 +104,13 @@ export function useWidgetApi(): WidgetApiState {
       widget.on(`action:${WidgetApiToWidgetAction.ThemeChange}`, handleThemeChange);
       widget.on(`action:${WidgetApiToWidgetAction.TakeScreenshot}`, handleGenericAction);
 
+      widget.on("ready", () => {
+        LOG("WidgetApi ready event received");
+        if (mountedRef.current) dispatch({ type: "READY" });
+      });
+
       widget.start();
-      LOG("WidgetApi started");
+      LOG("WidgetApi started, waiting for ready event");
 
       dispatch({ type: "INIT", api: widget, userId: urlParams.userId, roomId: urlParams.roomId });
 
