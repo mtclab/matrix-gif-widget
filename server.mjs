@@ -24,7 +24,7 @@ async function proxyTenor(req, res) {
     res.status(500).json({ error: "TENOR_API_KEY not configured" });
     return;
   }
-  const subpath = req.path.replace(/^\/tenor\/?/, "");
+  const subpath = req.path.replace(/^\/?/, "");
   const url = new URL(`https://tenor.googleapis.com/v2/${subpath}`);
   for (const [key, value] of Object.entries(req.query)) {
     if (key !== "key") url.searchParams.set(key, value);
@@ -47,7 +47,7 @@ async function proxyGiphy(req, res) {
     res.status(500).json({ error: "GIPHY_API_KEY not configured" });
     return;
   }
-  const subpath = req.path.replace(/^\/giphy\/?/, "");
+  const subpath = req.path.replace(/^\/?/, "");
   const url = new URL(`https://api.giphy.com/v1/gifs/${subpath}`);
   for (const [key, value] of Object.entries(req.query)) {
     if (key !== "api_key") url.searchParams.set(key, value);
