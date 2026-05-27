@@ -10,12 +10,19 @@ const TENOR_KEY = process.env.TENOR_API_KEY || "";
 const GIPHY_KEY = process.env.GIPHY_API_KEY || "";
 const CORS_ORIGINS = (process.env.CORS_ORIGINS || "").split(",").filter(Boolean);
 const FRAME_ANCESTORS = process.env.FRAME_ANCESTORS || "'self'";
+const MEDIA_URL_REWRITE = process.env.MEDIA_URL_REWRITE !== "false";
 
 const ALLOWED_TENOR_PATHS = /^\/(search|featured|categories|gifs|search_suggestions|autocomplete|trending)(\/|$|\?)/i;
 const ALLOWED_GIPHY_PATHS = /^\/(search|trending|translate|random|gifs_by_id|categories|search_suggestions|autocomplete)(\/|$|\?)/i;
 
+const MEDIA_ORIGINS = {
+  tenor: "https://media.tenor.com",
+  giphy: "https://media.giphy.com",
+};
+
 const app = express();
 
+app.set("trust proxy", true);
 app.use(express.json());
 
 if (CORS_ORIGINS.length > 0) {
@@ -36,7 +43,7 @@ if (CORS_ORIGINS.length > 0) {
 
 const rateLimiter = new Map();
 const RATE_WINDOW = 60_000;
-const RATE_MAX = 60;
+const RATE_MAX = 120;
 
 function checkRateLimit(req, _res, next) {
   const ip = req.ip || req.socket.remoteAddress || "unknown";
@@ -53,6 +60,19 @@ function checkRateLimit(req, _res, next) {
     return;
   }
   next();
+}
+
+function rewriteMediaUrls(body, origin) {
+  if (!MEDIA_URL_REWRITE) return body;
+  body = body.replaceAll("https://media.tenor.com", `${origin}/media/tenor`);
+  body = body.replace(/https:\/\/media\d*\.giphy\.com/g, `${origin}/media/giphy`);
+  return body;
+}
+
+function getOrigin(req) {
+  const proto = req.get("x-forwarded-proto") || req.protocol;
+  const host = req.get("host");
+  return `${proto}://${host}`;
 }
 
 app.get("/health", (_req, res) => {
@@ -80,8 +100,11 @@ async function proxyTenor(req, res) {
   try {
     const upstream = await fetch(url.toString());
     const data = await upstream.text();
+    const origin = getOrigin(req);
+    const rewritten = rewriteMediaUrls(data, origin);
     res.set("Content-Type", upstream.headers.get("content-type") || "application/json");
-    res.status(upstream.status).send(data);
+    res.set("Cache-Control", "public, max-age=300");
+    res.status(upstream.status).send(rewritten);
   } catch {
     res.status(502).json({ error: "Upstream Tenor request failed" });
   }
@@ -107,24 +130,57 @@ async function proxyGiphy(req, res) {
   try {
     const upstream = await fetch(url.toString());
     const data = await upstream.text();
+    const origin = getOrigin(req);
+    const rewritten = rewriteMediaUrls(data, origin);
     res.set("Content-Type", upstream.headers.get("content-type") || "application/json");
-    res.status(upstream.status).send(data);
+    res.set("Cache-Control", "public, max-age=300");
+    res.status(upstream.status).send(rewritten);
   } catch {
     res.status(502).json({ error: "Upstream Giphy request failed" });
   }
 }
 
+async function proxyMedia(req, res) {
+  const provider = req.params.provider;
+  const baseUrl = MEDIA_ORIGINS[provider];
+  if (!baseUrl) {
+    res.status(400).json({ error: "Unknown media provider" });
+    return;
+  }
+  const remotePath = req.path.replace(/^\/+/, "");
+  const remoteUrl = `${baseUrl}/${remotePath}`;
+
+  try {
+    const upstream = await fetch(remoteUrl, { redirect: "follow" });
+    if (!upstream.ok) {
+      res.status(upstream.status).json({ error: `Upstream ${provider} media error: ${upstream.status}` });
+      return;
+    }
+    const contentType = upstream.headers.get("content-type") || "image/gif";
+    res.set("Content-Type", contentType);
+    res.set("Cache-Control", "public, max-age=86400");
+    res.set("Access-Control-Allow-Origin", "*");
+    const buffer = Buffer.from(await upstream.arrayBuffer());
+    res.send(buffer);
+  } catch {
+    res.status(502).json({ error: `Upstream ${provider} media fetch failed` });
+  }
+}
+
 app.use("/tenor", checkRateLimit, proxyTenor);
 app.use("/giphy", checkRateLimit, proxyGiphy);
+app.use("/media/:provider", checkRateLimit, proxyMedia);
 
 const distDir = join(__dirname, "dist");
+
+const SELF_ORIGIN = process.env.SELF_ORIGIN || "https://WIDGET_DOMAIN";
 
 const cspHeader = [
   "default-src 'self'",
   "script-src 'self'",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: https://media.tenor.com https://media.giphy.com https://*.tenor.com https://*.giphy.com",
-  "connect-src 'self' https://media.tenor.com https://media.giphy.com",
+  "img-src 'self' data: https://media.tenor.com https://media.giphy.com https://*.tenor.com https://*.giphy.com " + SELF_ORIGIN,
+  "connect-src 'self' https://tenor.googleapis.com https://api.giphy.com https://media.tenor.com https://media.giphy.com " + SELF_ORIGIN,
   "frame-ancestors " + FRAME_ANCESTORS,
 ].join("; ");
 
@@ -160,4 +216,5 @@ app.listen(PORT, () => {
   if (GIPHY_KEY) console.log("  Giphy API: configured");
   if (CORS_ORIGINS.length) console.log(`  CORS origins: ${CORS_ORIGINS.join(", ")}`);
   console.log(`  Frame ancestors: ${FRAME_ANCESTORS}`);
+  console.log(`  Media URL rewrite: ${MEDIA_URL_REWRITE ? "enabled" : "disabled"}`);
 });
