@@ -97,6 +97,13 @@ export function useWidgetApi(): WidgetApiState {
       widget.on(`action:${WidgetApiToWidgetAction.TakeScreenshot}`, handleGenericAction);
 
       widget.start();
+      widget.sendContentLoaded();
+
+      const sendHeight = () => {
+        widget.setAlwaysOnScreen(true);
+      };
+      const ro = new ResizeObserver(sendHeight);
+      ro.observe(document.documentElement);
 
       dispatch({ type: "INIT", api: widget, userId: urlParams.userId, roomId: urlParams.roomId });
     } catch (err) {
