@@ -124,7 +124,7 @@ const cspHeader = [
   "script-src 'self'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: https://media.tenor.com https://media.giphy.com https://*.tenor.com https://*.giphy.com",
-  "connect-src 'self'",
+  "connect-src 'self' https://media.tenor.com https://media.giphy.com",
   "frame-ancestors " + FRAME_ANCESTORS,
 ].join("; ");
 
