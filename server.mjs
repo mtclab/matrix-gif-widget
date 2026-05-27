@@ -173,7 +173,7 @@ app.use("/media/:provider", checkRateLimit, proxyMedia);
 
 const distDir = join(__dirname, "dist");
 
-const SELF_ORIGIN = process.env.SELF_ORIGIN || "https://WIDGET_DOMAIN";
+const SELF_ORIGIN = process.env.SELF_ORIGIN || "https://localhost:3000";
 
 const cspHeader = [
   "default-src 'self'",
