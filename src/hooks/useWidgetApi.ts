@@ -1,9 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import {
   WidgetApi,
-  MatrixCapabilities,
   WidgetApiToWidgetAction,
-  StickerpickerCapabilities,
 } from "matrix-widget-api";
 import type { WidgetConfig } from "../types";
 
@@ -68,8 +66,6 @@ function getWidgetUrlParams(): { userId: string | null; roomId: string | null; w
 
 const LOG = (...args: unknown[]) => console.log("[GIF-Widget]", ...args);
 
-const READY_TIMEOUT_MS = 5000;
-
 export function useWidgetApi(): WidgetApiState {
   const [state, dispatch] = useReducer(reducer, initState);
   const apiRef = useRef<WidgetApi | null>(null);
@@ -87,35 +83,39 @@ export function useWidgetApi(): WidgetApiState {
 
   const handleGenericAction = useCallback((ev: Event) => {
     ev.preventDefault();
+    LOG("handleGenericAction:", (ev as CustomEvent).detail?.action);
     const widget = apiRef.current;
     if (widget) widget.transport.reply((ev as CustomEvent).detail, {});
   }, []);
 
   useEffect(() => {
     const urlParams = getWidgetUrlParams();
+    // Element substitutes $matrix_widget_id, $matrix_user_id, $matrix_room_id in the widget URL
     LOG("Init — urlParams:", urlParams, "location:", window.location.href);
 
-    const initialWidgetId = urlParams.widgetId || undefined;
-    LOG("Using widgetId from URL:", initialWidgetId);
+    const widgetId = urlParams.widgetId || undefined;
+    if (!widgetId) {
+      LOG("WARNING: no widgetId in URL — Element requires $matrix_widget_id placeholder in widget URL");
+    }
 
-    // Raw postMessage debug listener — see everything Element sends
     const rawHandler = (event: MessageEvent) => {
       if (event.data && typeof event.data === "object" && event.data.api) {
-        LOG("RAW postMessage received:", JSON.stringify(event.data).slice(0, 500));
+        LOG("RAW postMessage:", JSON.stringify(event.data).slice(0, 500));
       }
     };
     window.addEventListener("message", rawHandler);
 
     try {
-      const widget = new WidgetApi(initialWidgetId);
+      const widget = new WidgetApi(widgetId);
       apiRef.current = widget;
-      LOG("WidgetApi created with widgetId:", initialWidgetId);
+      LOG("WidgetApi created with widgetId:", widgetId);
 
-      widget.requestCapability(MatrixCapabilities.Screenshots);
-      widget.requestCapabilities(StickerpickerCapabilities);
+      // Only request capabilities a custom widget can actually get approved
       widget.requestCapabilityToSendMessage("m.image");
-      LOG("Capabilities requested");
+      widget.requestCapabilityToSendMessage("m.room.message");
+      LOG("Capabilities requested: m.image, m.room.message");
 
+      // Handle all toWidget actions Element may send — reply to each one
       widget.on(`action:${WidgetApiToWidgetAction.UpdateVisibility}`, handleGenericAction);
       widget.on(`action:${WidgetApiToWidgetAction.ThemeChange}`, handleThemeChange);
       widget.on(`action:${WidgetApiToWidgetAction.TakeScreenshot}`, handleGenericAction);
@@ -139,17 +139,6 @@ export function useWidgetApi(): WidgetApiState {
       LOG("WidgetApi started, waiting for ready event");
 
       dispatch({ type: "INIT", api: widget, userId: urlParams.userId, roomId: urlParams.roomId });
-
-      const readyTimer = setTimeout(() => {
-        if (!readyFiredRef.current) {
-          LOG("Ready timeout — self-declaring ready (Element may not negotiate capabilities for custom widgets)");
-          onReady();
-        }
-      }, READY_TIMEOUT_MS);
-
-      return () => {
-        clearTimeout(readyTimer);
-      };
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to initialize Widget API";
       LOG("Init error:", msg);
@@ -170,7 +159,7 @@ export function useWidgetApi(): WidgetApiState {
   return state;
 }
 
-const STICKER_SEND_TIMEOUT = 15000;
+const SEND_TIMEOUT = 15000;
 
 const MEDIA_PROXY_BASE = typeof window !== "undefined" ? `${window.location.origin}/media` : "/media";
 
@@ -199,20 +188,23 @@ export async function sendGifAsImage(
     fileName: string;
   }
 ): Promise<boolean> {
-  if (!api) { LOG("sendGifAsImage: no api"); return false; }
+  if (!api) {
+    LOG("sendGifAsImage: no WidgetApi — cannot send");
+    return false;
+  }
 
   LOG("sendGifAsImage: starting with url=", gifUrl, "data=", gifData);
 
-  const stickerContent = {
+  const stickerContent: { url: string; info: { h: number; w: number; mimetype: string; size?: number } } = {
     url: gifUrl,
     info: {
       h: gifData.height,
       w: gifData.width,
       mimetype: gifData.mimeType,
-      size: undefined as number | undefined,
     },
   };
 
+  // Try fetching via media proxy for uploadFile
   const proxiedUrl = resolveGifUrl(gifUrl);
 
   try {
@@ -221,7 +213,7 @@ export async function sendGifAsImage(
       const blob = await response.blob();
       const file = new File([blob], gifData.fileName, { type: gifData.mimeType });
       stickerContent.info.size = blob.size;
-      LOG("Fetched GIF via proxy, size=", blob.size, "attempting uploadFile");
+      LOG("Fetched GIF via proxy, size=", blob.size);
 
       try {
         const uploadResponse = await api.uploadFile(file);
@@ -235,19 +227,18 @@ export async function sendGifAsImage(
       }
     }
   } catch (fetchErr: unknown) {
-    LOG("Could not fetch GIF via proxy, trying direct URL:", fetchErr);
+    LOG("Proxy fetch failed, trying direct URL:", fetchErr);
     try {
       const response = await fetch(gifUrl);
       if (response.ok) {
         const blob = await response.blob();
         const file = new File([blob], gifData.fileName, { type: gifData.mimeType });
         stickerContent.info.size = blob.size;
-        LOG("Fetched GIF direct, size=", blob.size, "attempting uploadFile");
+        LOG("Fetched GIF direct, size=", blob.size);
 
         try {
           const uploadResponse = await api.uploadFile(file);
           const mxcUri = uploadResponse?.content_uri;
-          LOG("uploadFile response:", uploadResponse, "mxcUri=", mxcUri);
           if (mxcUri) {
             stickerContent.url = mxcUri;
           }
@@ -256,86 +247,28 @@ export async function sendGifAsImage(
         }
       }
     } catch (directErr: unknown) {
-      LOG("Could not fetch GIF for upload, sending HTTP URL:", directErr);
+      LOG("Direct fetch also failed:", directErr);
     }
   }
 
-  // Try WidgetApi first
-  LOG("Sending sticker with content.url=", stickerContent.url);
+  // Send via sendRoomEvent — custom widgets use m.room.message with m.image msgtype
+  LOG("Sending m.room.message with content.url=", stickerContent.url);
   try {
     await Promise.race([
-      api.sendSticker({
-        name: gifData.fileName,
-        description: gifData.fileName,
-        content: stickerContent,
+      api.sendRoomEvent("m.room.message", {
+        msgtype: "m.image",
+        body: gifData.fileName,
+        url: stickerContent.url,
+        info: stickerContent.info,
       }),
       new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("sendSticker timeout")), STICKER_SEND_TIMEOUT)
+        setTimeout(() => reject(new Error("sendRoomEvent timeout")), SEND_TIMEOUT)
       ),
     ]);
-    LOG("sendSticker succeeded!");
-    return true;
-  } catch (stickerErr: unknown) {
-    LOG("sendSticker failed:", stickerErr);
-  }
-
-  // Fallback: try sendRoomEvent
-  LOG("Trying sendRoomEvent m.room.message fallback");
-  try {
-    await api.sendRoomEvent("m.room.message", {
-      msgtype: "m.image",
-      body: gifData.fileName,
-      url: stickerContent.url,
-      info: stickerContent.info,
-    });
     LOG("sendRoomEvent succeeded!");
     return true;
-  } catch (msgErr: unknown) {
-    LOG("sendRoomEvent failed:", msgErr);
-  }
-
-  // Final fallback: direct postMessage to Element
-  LOG("Trying direct postMessage fallback to parent");
-  try {
-    const fallbackWidgetId = new URLSearchParams(window.location.search).get("widgetId") || new URLSearchParams(window.location.hash.replace(/^#\/?/, "")).get("widgetId") || "stickerpicker";
-    LOG("sendGifAsImage: api.widgetId not accessible, using fallback:", fallbackWidgetId);
-    const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-
-    // Try im.vector.action (Element Web custom action)
-    const stickerAction = {
-      api: "fromWidget",
-      widgetId: fallbackWidgetId,
-      requestId,
-      action: "m.sticker",
-      data: {
-        name: gifData.fileName,
-        description: gifData.fileName,
-        content: stickerContent,
-      },
-    };
-
-    LOG("Sending direct postMessage:", JSON.stringify(stickerAction).slice(0, 300));
-    window.parent.postMessage(stickerAction, "*");
-
-    // Also try the toWidget notify format
-    const notifyAction = {
-      api: "toWidget",
-      widgetId: fallbackWidgetId,
-      requestId: `req_${Date.now()}_${Math.random().toString(36).slice(2)}_notify`,
-      action: "m.sticker",
-      data: {
-        name: gifData.fileName,
-        description: gifData.fileName,
-        content: stickerContent,
-      },
-    };
-    window.parent.postMessage(notifyAction, "*");
-
-    // Return true optimistically — we can't confirm delivery via postMessage
-    LOG("Direct postMessage sent");
-    return true;
-  } catch (postMsgErr: unknown) {
-    LOG("All send methods failed:", postMsgErr);
+  } catch (err: unknown) {
+    LOG("sendRoomEvent failed:", err);
     return false;
   }
 }

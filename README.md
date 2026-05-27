@@ -68,7 +68,7 @@ npm run dev
 Open Element Web, add a widget with URL:
 
 ```
-http://localhost:5173/?provider=tenor&apiKey=YOUR_KEY
+http://localhost:5173/?provider=tenor&apiKey=YOUR_KEY&widgetId=$matrix_widget_id&userId=$matrix_user_id&roomId=$matrix_room_id&theme=$theme
 ```
 
 ### Development (full server with proxy)
@@ -82,7 +82,7 @@ TENOR_API_KEY=your-key npm run start:dev
 Widget URL (same origin, no API key needed in browser):
 
 ```
-http://localhost:3000/?provider=tenor
+http://localhost:3000/?provider=tenor&widgetId=$matrix_widget_id&userId=$matrix_user_id&roomId=$matrix_room_id&theme=$theme
 ```
 
 ### Docker
@@ -124,12 +124,20 @@ GIPHY_API_KEY=your-giphy-key
 
 Production (proxy, no key in URL):
 ```
-https://gif.your-domain.com/?provider=tenor
+https://gif.your-domain.com/?provider=tenor&widgetId=$matrix_widget_id&userId=$matrix_user_id&roomId=$matrix_room_id&theme=$theme
 ```
+
+**Important:** The `$matrix_*` template placeholders are required. Element substitutes these when loading the widget:
+- `$matrix_widget_id` — the widget's unique ID (required for WidgetApi handshake)
+- `$matrix_user_id` — the current user's Matrix ID
+- `$matrix_room_id` — the room ID the widget is in
+- `$theme` — the client's current theme (`light` or `dark`)
+
+Without `widgetId`, the WidgetApi cannot complete capability negotiation and all sends will fail with "Not ready or unknown widget ID".
 
 Development (direct API):
 ```
-http://localhost:5173/?provider=tenor&apiKey=YOUR_KEY
+http://localhost:5173/?provider=tenor&apiKey=YOUR_KEY&widgetId=$matrix_widget_id&userId=$matrix_user_id&roomId=$matrix_room_id&theme=$theme
 ```
 
 ## Adding Widget to a Matrix Room
@@ -138,7 +146,7 @@ http://localhost:5173/?provider=tenor&apiKey=YOUR_KEY
 
 1. Open a room
 2. Click the room name → **Settings** → **Integrations**
-3. Add a custom widget with your deployed widget URL
+3. Add a custom widget with the URL including `$matrix_*` placeholders (see above)
 
 ### Via Matrix State Event
 
@@ -149,11 +157,13 @@ http://localhost:5173/?provider=tenor&apiKey=YOUR_KEY
   "content": {
     "type": "im.vector.modular.widgets",
     "name": "GIF Picker",
-    "url": "https://gif.your-domain.com/?provider=tenor",
+    "url": "https://gif.your-domain.com/?provider=tenor&widgetId=$matrix_widget_id&userId=$matrix_user_id&roomId=$matrix_room_id&theme=$theme",
     "data": {}
   }
 }
 ```
+
+**Note:** This widget uses `sendRoomEvent("m.room.message")` to send GIFs as `m.image` messages. It does **not** use `sendSticker` — that capability is only available to `m.stickerpicker` type widgets.
 
 ## Tech Stack
 
