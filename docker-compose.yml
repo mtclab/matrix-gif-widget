@@ -6,15 +6,9 @@ services:
         VITE_GIF_API_KEY: ${VITE_GIF_API_KEY:-}
         VITE_GIF_PROXY_URL: ${VITE_GIF_PROXY_URL:-}
     ports:
-      - "8080:8080"
-    restart: unless-stopped
-
-  proxy:
-    build: ./proxy
-    ports:
-      - "3100:3100"
+      - "3000:3000"
     environment:
       - TENOR_API_KEY=${TENOR_API_KEY:-}
       - GIPHY_API_KEY=${GIPHY_API_KEY:-}
-      - PROXY_PORT=3100
+      - PORT=3000
     restart: unless-stopped

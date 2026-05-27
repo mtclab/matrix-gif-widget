@@ -9,10 +9,16 @@ function getConfig() {
     console.warn("No GIF API key or proxy URL configured. Set VITE_GIF_API_KEY env var or pass apiKey/provider URL params.");
   }
 
+  let baseUrl: string | undefined;
+  if (proxyUrl) {
+    const base = proxyUrl.replace(/\/+$/, "");
+    baseUrl = provider === "tenor" ? `${base}/tenor` : `${base}/giphy`;
+  }
+
   return {
     provider,
     apiKey,
-    baseUrl: proxyUrl,
+    baseUrl,
   };
 }
 

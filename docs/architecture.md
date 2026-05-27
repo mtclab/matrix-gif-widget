@@ -10,61 +10,59 @@
 │  │  ┌─────────────────────────────────────────────────────────┐  │  │
 │  │  │  Matrix Room                                            │  │  │
 │  │  │                                                         │  │  │
-│  │  │   ┌─────────────────────────────────────────────────┐   │  │  │
-│  │  │   │  Widget iframe                                  │   │  │  │
-│  │  │   │                                                 │   │  │  │
-│  │  │   │   ┌─────────────────────────────────────────┐   │   │  │  │
-│  │  │   │   │  Matrix GIF Widget (React SPA)         │   │   │  │  │
-│  │  │   │   │                                         │   │   │  │  │
-│  │  │   │   │   ┌─────────────────────────┐          │   │   │  │  │
-│  │  │   │   │   │  Search: [cat GIFs  🔍] │          │   │   │  │  │
-│  │  │   │   │   └─────────────────────────┘          │   │   │  │  │
-│  │  │   │   │                                         │   │   │  │  │
-│  │  │   │   │   ┌──────┐ ┌──────┐ ┌──────┐          │   │   │  │  │
-│  │  │   │   │   │ 🐱   │ │ 🐱   │ │ 🐱   │  ← grid  │   │   │  │  │
-│  │  │   │   │   └──────┘ └──────┘ └──────┘          │   │   │  │  │
-│  │  │   │   │   ┌──────┐ ┌──────┐ ┌──────┐          │   │   │  │  │
-│  │  │   │   │   │ 🐱   │ │ 🐱   │ │ 🐱   │          │   │   │  │  │
-│  │  │   │   │   └──────┘ └──────┘ └──────┘          │   │   │  │  │
-│  │  │   │   │                                         │   │   │  │  │
-│  │  │   │   │   ┌─ Preview Overlay ──────────────┐   │   │  │  │  │
-│  │  │   │   │   │  [GIF animation]                │   │   │  │  │  │
-│  │  │   │   │   │  [Send GIF] [Cancel]            │   │   │  │  │  │
-│  │  │   │   │   └─────────────────────────────────┘   │   │  │  │  │
-│  │  │   │   └─────────────────────────────────────────┘   │   │  │  │
-│  │  │   └─────────────────────────────────────────────────┘   │  │  │
-│  │  └─────────────────────────────────────────────────────────┘   │  │
+│  │  │   ┌─────────────────────────────────────────────────┐  │  │  │
+│  │  │   │  Widget iframe                                  │  │  │  │
+│  │  │   │                                                 │  │  │  │
+│  │  │   │   ┌─────────────────────────┐                  │  │  │  │
+│  │  │   │   │  Search: [cat GIFs  🔍] │                  │  │  │  │
+│  │  │   │   └─────────────────────────┘                  │  │  │  │
+│  │  │   │                                                 │  │  │  │
+│  │  │   │   ┌──────┐ ┌──────┐ ┌──────┐                  │  │  │  │
+│  │  │   │   │ 🐱   │ │ 🐱   │ │ 🐱   │  ← trending     │  │  │  │
+│  │  │   │   └──────┘ └──────┘ └──────┘                  │  │  │  │
+│  │  │   │   ┌──────┐ ┌──────┐ ┌──────┐                  │  │  │  │
+│  │  │   │   │ 🐱   │ │ 🐱   │ │ 🐱   │  ← infinite     │  │  │  │
+│  │  │   │   └──────┘ └──────┘ └──────┘     scroll       │  │  │  │
+│  │  │   │                                                 │  │  │  │
+│  │  │   │   ┌─ Preview Overlay ──────────────┐            │  │  │  │
+│  │  │   │   │  [GIF animation]                │            │  │  │  │
+│  │  │   │   │  [Send GIF] [Cancel]            │            │  │  │  │
+│  │  │   │   └─────────────────────────────────┘            │  │  │  │
+│  │  │   └─────────────────────────────────────────────────┘  │  │  │
+│  │   └─────────────────────────────────────────────────────────┘  │  │
 │  └───────────────────────────────────────────────────────────────┘  │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 
-                        │                           │
-            ① Widget API (postMessage)      ② GIF search (HTTP)
-            (within iframe boundary)         (direct or proxied)
-                        │                           │
-                        ▼                           ▼
-┌──────────────────────────┐         ┌──────────────────────────────┐
-│  Matrix Homeserver       │         │  GIF API Proxy (optional)   │
-│  (e.g. matrix.org)       │         │  (Express on port :3100)     │
-│                          │         │                              │
-│  • Upload media          │         │  GET /tenor/search?q=...     │
-│    → returns mxc:// URI  │         │  GET /tenor/featured          │
-│  • Send m.room.message   │         │  GET /giphy/search?q=...     │
-│    with mxc:// URL       │         │  GET /giphy/trending          │
-│                          │         │                              │
-│  ③ uploadFile(blob)      │         │  Injects server-side API     │
-│  ④ sendRoomEvent()       │         │  keys — no keys in browser   │
-│                          │         └──────────┬───────────────────┘
-└──────────────────────────┘                    │
-                                                │  forwards with key
-                                                ▼
-                                 ┌──────────────────────────────┐
-                                 │  Tenor API (v2)               │
-                                 │  tenor.googleapis.com/v2      │
-                                 ├──────────────────────────────┤
-                                 │  Giphy API                    │
-                                 │  api.giphy.com/v1/gifs        │
-                                 └──────────────────────────────┘
+            │                              │
+   ① Search GIFs (HTTP)        ② Send GIF (Widget API)
+   /tenor/search?q=cat          uploadFile → mxc://
+   /giphy/search?q=cat          sendRoomEvent → m.image
+            │                              │
+            ▼                              ▼
+┌─────────────────────────────┐   ┌──────────────────────────┐
+│  Single Express Server      │   │  Matrix Homeserver       │
+│  (port 3000)                │   │  (e.g. matrix.org)      │
+│                             │   │                          │
+│  ┌───────────────────────┐  │   │  • Receives file upload │
+│  │  SPA static files     │  │   │  • Returns mxc:// URI    │
+│  │  (dist/)              │  │   │  • Distributes m.image   │
+│  │  X-Frame-Options:     │  │   │    to room members      │
+│  │  ALLOWALL              │  │   └──────────────────────────┘
+│  │  CSP: frame-ancestors *│  │
+│  └───────────────────────┘  │
+│                             │
+│  ┌───────────────────────┐  │
+│  │  /tenor/*  ──────────────│──→ Tenor API v2
+│  │  (injects API key)      │ │   tenor.googleapis.com
+│  └───────────────────────┘  │
+│                             │
+│  ┌───────────────────────┐  │
+│  │  /giphy/*  ──────────────│──→ Giphy API
+│  │  (injects API key)      │ │   api.giphy.com
+│  └───────────────────────┘  │
+│                             │
+└─────────────────────────────┘
 
 
 ─────────────────────────────────────────────────────────────────────
@@ -76,61 +74,48 @@
          ▼
   ┌──────────────┐     fetch(gifUrl)      ┌────────────────┐
   │  Widget SPA   │ ───────────────────── │ Tenor / Giphy  │
-  │              │                         │  CDN (gif URL)  │
+  │              │      (direct CDN)       │  CDN (gif URL)  │
   └──────┬───────┘                         └────────────────┘
          │ receives Blob
          ▼
   ┌──────────────┐     uploadFile(blob)    ┌────────────────┐
-  │  Widget SPA   │ ───────────────────── │     Matrix       │
-  │              │   via Widget API         │  Homeserver      │
-  └──────┬───────┘                         │                 │
-         │ receives mxc:// URI             │  media/          │
-         ▼                                  │  upload → mxc    │
+  │  Widget SPA   │ ───────────────────── │  Homeserver    │
+  │              │   via Widget API         │  media/        │
+  └──────┬───────┘                         │  upload → mxc  │
+         │ receives mxc:// URI             └────────────────┘
+         ▼
   ┌──────────────┐     sendRoomEvent()     └────────────────┘
   │  Widget SPA   │ ───────────────────── ──┘
-  │              │   m.room.message
   │              │   msgtype: m.image
-  │              │   url: mxc://...
+  │              │   url: mxc://domain/...
   └──────────────┘
 
 
 ─────────────────────────────────────────────────────────────────────
-  DEPLOYMENT — Two Options
+  DEPLOYMENT — Single Container
 ─────────────────────────────────────────────────────────────────────
 
-  Option A — Simple (no proxy, API key in URL or env)
-  ─────────────────────────────────────────────────────
+  docker compose up -d
 
-    ┌─────────────┐
-    │  nginx       │  ← serves static SPA from :8080
-    │  (Docker)    │
-    └─────────────┘
-    
-    Widget URL: https://gif.example.com/?provider=tenor&apiKey=KEY
-    ⚠ API key visible in widget URL (use proxy instead for prod)
+  One service, one container:
 
+    ┌─────────────────────────────────────────────┐
+    │  matrix-gif-widget container (:3000)       │
+    │                                             │
+    │  Express 5 server:                          │
+    │    /tenor/*  → proxies to Tenor API         │
+    │    /giphy/*  → proxies to Giphy API         │
+    │    /*        → serves React SPA (dist/)     │
+    │                                             │
+    │  Environment:                              │
+    │    TENOR_API_KEY=...                        │
+    │    GIPHY_API_KEY=...                         │
+    │    PORT=3000                                 │
+    └─────────────────────────────────────────────┘
 
-  Option B — Production (proxy hides API keys)
-  ──────────────────────────────────────────────
-
-    ┌─────────────────┐     ┌─────────────────┐
-    │  nginx           │     │  Express proxy    │
-    │  (widget SPA)    │     │  (API keys)       │
-    │  :8080           │     │  :3100            │
-    └─────────────────┘     └─────────────────┘
-    
-    Widget URL: https://gif.example.com/?provider=tenor&proxyUrl=https://gif.example.com:3100
-    ✅ No API keys in browser — proxy injects them server-side
-
-
-  Option C — Docker Compose (both together)
-  ──────────────────────────────────────────
-
-    docker compose up -d
-    
-    Services:
-      widget  → http://localhost:8080  (nginx + SPA)
-      proxy   → http://localhost:3100  (Express API proxy)
+  No nginx, no separate proxy container.
+  Your front-facing reverse proxy (nginx, Caddy, Traefik)
+  terminates TLS and forwards to :3000.
 
 
 ─────────────────────────────────────────────────────────────────────
@@ -152,3 +137,27 @@
   Element opens the URL in an iframe and injects the Widget API
   via postMessage — the widget auto-negotiates capabilities.
 ```
+
+## Route Details
+
+| Route | Purpose |
+|-------|---------|
+| `GET /health` | Health check endpoint |
+| `GET /tenor/*` | Proxy to `tenor.googleapis.com/v2/*` with server-side API key |
+| `GET /giphy/*` | Proxy to `api.giphy.com/v1/gifs/*` with server-side API key |
+| `GET /*` | Static SPA files from `dist/` (SPA fallback to `index.html`) |
+
+All responses include `X-Frame-Options: ALLOWALL` and `Content-Security-Policy: frame-ancestors *` headers to allow iframe embedding in Matrix clients.
+
+## Widget API Capabilities
+
+The widget requests these capabilities from the Matrix client:
+
+- `m.sticker` — send stickers/images
+- `m.image` message type — send GIF as image message
+- Screenshots capability
+- Visibility and theme change handling
+
+## Theme Support
+
+The widget listens for `ThemeChange` actions from the Matrix client and switches between `theme-dark` and `theme-light` CSS variable sets automatically.

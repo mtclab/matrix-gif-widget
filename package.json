@@ -1,15 +1,19 @@
 {
   "name": "matrix-gif-widget",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "lint": "eslint .",
-    "preview": "vite preview"
+    "lint": "eslint src/",
+    "preview": "vite preview",
+    "start": "node server.mjs",
+    "start:dev": "node --watch server.mjs"
   },
   "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
     "matrix-widget-api": "^1.17.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6"

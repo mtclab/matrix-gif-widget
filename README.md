@@ -2,6 +2,8 @@
 
 A Matrix widget for searching and sending GIFs in Matrix rooms. Works as an iframe widget inside Element Web, Element Desktop, and other Matrix clients that support the Widget API.
 
+Single Express server serves both the static SPA and the API proxy — no separate nginx or proxy container needed.
+
 ## Features
 
 - Search GIFs from Tenor or Giphy
@@ -10,70 +12,90 @@ A Matrix widget for searching and sending GIFs in Matrix rooms. Works as an ifra
 - Preview selected GIF before sending
 - Sends GIFs as `m.image` events with `mxc://` URI (uploaded to Matrix media server)
 - Dark/light theme following Matrix client theme
-- Lightweight static SPA — no backend required for basic usage
-- Optional proxy server for API key security
+- Unified server: static SPA + API proxy in one container
+- API keys stay server-side (never exposed to browser)
 
 ## Architecture
 
 ```
-┌──────────────────────────────┐
-│   Matrix Client (Element)    │
-│                              │
-│  ┌────────────────────────┐  │
-│  │    Widget iframe        │  │
-│  │  ┌──────────────────┐  │  │
-│  │  │  GIF Search Bar  │  │  │
-│  │  │  GIF Grid        │  │  │
-│  │  │  Preview + Send  │  │  │
-│  │  └──────────────────┘  │  │
-│  └──────┬─────────────────┘  │
-│         │ Widget API          │
-│         ▼                    │
-│  Matrix Protocol             │
-│  (upload → mxc:// → m.image) │
-└──────────────────────────────┘
-         │ (optional proxy)
-         ▼
-┌──────────────────────────────┐
-│ GIF Provider (Tenor/Giphy)  │
-└──────────────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│  User's Browser (Element Web)                              │
+│                                                            │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │  Matrix Room                                         │  │
+│  │  ┌────────────────────────────────────────────────┐  │  │
+│  │  │  Widget iframe (SPA served by Express)         │  │  │
+│  │  │                                                │  │  │
+│  │  │   Search ──→ /tenor/search?q=cat              │  │  │
+│  │  │      │         (proxied with server API key)    │  │  │
+│  │  │      ↓                                         │  │  │
+│  │  │   GIF Grid ──→ Click ──→ Preview ──→ Send      │  │  │
+│  │  │                              │                  │  │  │
+│  │  └──────────────────────────────┼──────────────────┘  │  │
+│  │                                 │ Widget API         │  │
+│  └─────────────────────────────────┼────────────────────┘  │
+│                                    │                        │
+│  ┌─────────────────────────────────┼────────────────────┐  │
+│  │  Matrix Homeserver               │                    │  │
+│  │  ① uploadFile(gif blob) ─────────┘                    │  │
+│  │  ② returns mxc:// URI                                 │  │
+│  │  ③ sendRoomEvent(m.image with mxc://)                  │  │
+│  └────────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────┘
+
+        ┌────────────────────────────────────────┐
+        │  Single Express Server (port 3000)      │
+        │                                         │
+        │  /tenor/*  → proxy to Tenor API v2      │
+        │  /giphy/*  → proxy to Giphy API         │
+        │  /*        → serve static SPA (dist/)   │
+        │                                         │
+        │  TENOR_API_KEY and GIPHY_API_KEY        │
+        │  injected server-side, never in browser │
+        └────────────────────────────────────────┘
 ```
 
 ## Quick Start
 
-### Development
+### Development (frontend only, no proxy)
 
 ```bash
-# Set your GIF API key
 export VITE_GIF_API_KEY="your-tenor-api-key"
-
-# Install and run
 npm install
 npm run dev
 ```
 
-Open Element Web, add a custom widget to a room with URL:
+Open Element Web, add a widget with URL:
 
 ```
 http://localhost:5173/?provider=tenor&apiKey=YOUR_KEY
 ```
 
-### Production Build
+### Development (full server with proxy)
 
 ```bash
+npm install
 npm run build
+TENOR_API_KEY=your-key npm run start:dev
 ```
 
-Static files output to `dist/` — deploy to any web server (nginx, Caddy, S3, Cloudflare Pages).
+Widget URL (same origin, no API key needed in browser):
+
+```
+http://localhost:3000/?provider=tenor
+```
 
 ### Docker
 
 ```bash
-# Build and run with Docker Compose
 docker compose up -d
+```
 
-# With API proxy (recommended for production)
-VITE_GIF_PROXY_URL=http://your-server:3100/tenor docker compose up -d
+Set API keys via environment variables or `.env` file:
+
+```env
+TENOR_API_KEY=your-tenor-key
+GIPHY_API_KEY=your-giphy-key
 ```
 
 ## Configuration
@@ -82,42 +104,33 @@ VITE_GIF_PROXY_URL=http://your-server:3100/tenor docker compose up -d
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `VITE_GIF_API_KEY` | Yes* | Tenor or Giphy API key |
-| `VITE_GIF_PROXY_URL` | No | Proxy base URL (overrides direct API calls) |
+| `TENOR_API_KEY` | Yes* | Tenor API key (server-side) |
+| `GIPHY_API_KEY` | No | Giphy API key (server-side) |
+| `VITE_GIF_API_KEY` | No* | API key for direct calls (dev only, no proxy) |
+| `VITE_GIF_PROXY_URL` | No | Override proxy base URL (defaults to same origin) |
+| `PORT` | No | Server port (default: 3000) |
 
-\* Required unless using the proxy server.
+\* Either `TENOR_API_KEY` (for proxy) or `VITE_GIF_API_KEY` (for direct) must be set.
 
 ### URL Parameters
-
-Pass these as query parameters in the widget URL:
 
 | Parameter | Values | Default | Description |
 |-----------|--------|---------|-------------|
 | `provider` | `tenor`, `giphy` | `tenor` | GIF provider |
-| `apiKey` | string | env var | API key (avoid in production — use proxy instead) |
-| `proxyUrl` | URL | env var | Proxy server base URL |
+| `apiKey` | string | env var | API key (avoid in production) |
+| `proxyUrl` | URL | same origin | Proxy base URL |
 
-### Widget URL Example
+### Widget URL Examples
 
+Production (proxy, no key in URL):
 ```
-https://your-domain.com/?provider=tenor
-```
-
-(If using proxy, API key is not needed in the URL.)
-
-## API Proxy Server
-
-For production, use the included proxy server to keep API keys server-side:
-
-```bash
-cd proxy
-npm install
-cp .env.example .env
-# Edit .env with your API keys
-npm start
+https://gif.your-domain.com/?provider=tenor
 ```
 
-See [proxy/README.md](proxy/README.md) for details.
+Development (direct API):
+```
+http://localhost:5173/?provider=tenor&apiKey=YOUR_KEY
+```
 
 ## Adding Widget to a Matrix Room
 
@@ -126,20 +139,17 @@ See [proxy/README.md](proxy/README.md) for details.
 1. Open a room
 2. Click the room name → **Settings** → **Integrations**
 3. Add a custom widget with your deployed widget URL
-4. Or use Element's Integration Manager with the widget URL
 
 ### Via Matrix State Event
 
-Send an `m.widget` state event:
-
 ```json
 {
-  "type": "m.widget",
+  "type": "im.vector.modular.widgets",
   "state_key": "gif-widget",
   "content": {
-    "type": "m.widget",
+    "type": "im.vector.modular.widgets",
     "name": "GIF Picker",
-    "url": "https://your-domain.com/?provider=tenor",
+    "url": "https://gif.your-domain.com/?provider=tenor",
     "data": {}
   }
 }
@@ -147,12 +157,12 @@ Send an `m.widget` state event:
 
 ## Tech Stack
 
+- **Backend**: Express 5 (serves SPA + proxies GIF APIs)
 - **Frontend**: React 19 + TypeScript
 - **Build**: Vite 8
 - **Widget API**: `matrix-widget-api` v1.17+
 - **GIF APIs**: Tenor API v2, Giphy API
-- **Proxy**: Express 5 (optional, for API key security)
-- **Deploy**: Static SPA + Docker/nginx
+- **Deploy**: Single Docker container (no nginx needed)
 
 ## Project Structure
 
@@ -177,20 +187,20 @@ src/
 ├── index.css             # Dark/light theme styles
 └── main.tsx              # App entry point
 
-proxy/
-├── server.mjs            # Express API key proxy
-├── package.json
-└── .env.example
+server.mjs                # Express server (SPA + API proxy)
+Dockerfile                # Multi-stage build → single container
+docker-compose.yml        # Single-service deployment
 ```
 
 ## Development
 
 ```bash
-npm install          # Install dependencies
-npm run dev          # Start dev server (http://localhost:5173)
-npm run build        # Production build
-npm run lint         # Lint check
-npm run preview      # Preview production build
+npm install              # Install dependencies
+npm run dev              # Start Vite dev server (http://localhost:5173)
+npm run build            # Production build
+npm run start:dev        # Run server with --watch
+npm run start            # Run production server
+npm run lint             # Lint check
 ```
 
 ## License
