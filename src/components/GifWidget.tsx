@@ -98,6 +98,7 @@ export function GifWidget({ config }: GifWidgetProps) {
       <div className="gif-widget__content">
         {error && <div className="gif-widget__error">{error}</div>}
         {!ready && !widgetError && <div className="gif-widget__loading">Connecting to Matrix...</div>}
+        {ready && !widgetError && <div className="gif-widget__debug" style={{fontSize:'10px',color:'#888',padding:'2px 8px'}}>API ready | room={api ? 'yes' : 'no'}</div>}
         <GifGrid
           results={results}
           loading={loading}

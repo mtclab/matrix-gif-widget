@@ -81,31 +81,39 @@ export function useWidgetApi(): WidgetApiState {
     if (widget) widget.transport.reply((ev as CustomEvent).detail, {});
   }, []);
 
+  const LOG = (...args: unknown[]) => console.log("[GIF-Widget]", ...args);
+
   useEffect(() => {
     const urlParams = getWidgetUrlParams();
+    LOG("Init — urlParams:", urlParams, "location:", window.location.href);
 
     try {
       const widget = new WidgetApi(undefined);
       apiRef.current = widget;
+      LOG("WidgetApi created");
 
       widget.requestCapability(MatrixCapabilities.Screenshots);
       widget.requestCapabilities(StickerpickerCapabilities);
       widget.requestCapabilityToSendMessage("m.image");
+      LOG("Capabilities requested");
 
       widget.on(`action:${WidgetApiToWidgetAction.UpdateVisibility}`, handleGenericAction);
       widget.on(`action:${WidgetApiToWidgetAction.ThemeChange}`, handleThemeChange);
       widget.on(`action:${WidgetApiToWidgetAction.TakeScreenshot}`, handleGenericAction);
 
       widget.start();
+      LOG("WidgetApi started");
 
       dispatch({ type: "INIT", api: widget, userId: urlParams.userId, roomId: urlParams.roomId });
 
       requestAnimationFrame(() => {
-        widget.sendContentLoaded();
-        widget.setAlwaysOnScreen(true);
+        LOG("Sending contentLoaded + alwaysOnScreen");
+        widget.sendContentLoaded().then(() => LOG("contentLoaded acked")).catch((e: unknown) => LOG("contentLoaded failed:", e));
+        widget.setAlwaysOnScreen(true).then((v: boolean) => LOG("alwaysOnScreen result:", v)).catch((e: unknown) => LOG("alwaysOnScreen failed:", e));
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to initialize Widget API";
+      LOG("Init error:", msg);
       if (mountedRef.current) dispatch({ type: "ERROR", error: msg });
     }
 
@@ -122,6 +130,8 @@ export function useWidgetApi(): WidgetApiState {
   return state;
 }
 
+const LOG = (...args: unknown[]) => console.log("[GIF-Widget]", ...args);
+
 const STICKER_SEND_TIMEOUT = 15000;
 
 export async function sendGifAsImage(
@@ -134,7 +144,9 @@ export async function sendGifAsImage(
     fileName: string;
   }
 ): Promise<boolean> {
-  if (!api) return false;
+  if (!api) { LOG("sendGifAsImage: no api"); return false; }
+
+  LOG("sendGifAsImage: starting with url=", gifUrl, "data=", gifData);
 
   const stickerContent = {
     url: gifUrl,
@@ -152,21 +164,24 @@ export async function sendGifAsImage(
       const blob = await response.blob();
       const file = new File([blob], gifData.fileName, { type: gifData.mimeType });
       stickerContent.info.size = blob.size;
+      LOG("Fetched GIF, size=", blob.size, "attempting uploadFile");
 
       try {
         const uploadResponse = await api.uploadFile(file);
         const mxcUri = uploadResponse?.content_uri;
+        LOG("uploadFile response:", uploadResponse, "mxcUri=", mxcUri);
         if (mxcUri) {
           stickerContent.url = mxcUri;
         }
-      } catch (uploadErr) {
-        console.warn("uploadFile failed (MSC4039 unsupported?), using HTTP URL:", uploadErr);
+      } catch (uploadErr: unknown) {
+        LOG("uploadFile failed (MSC4039 unsupported?), using HTTP URL:", uploadErr);
       }
     }
-  } catch (fetchErr) {
-    console.warn("Could not fetch GIF for upload, sending HTTP URL:", fetchErr);
+  } catch (fetchErr: unknown) {
+    LOG("Could not fetch GIF for upload, sending HTTP URL:", fetchErr);
   }
 
+  LOG("Sending sticker with content.url=", stickerContent.url);
   try {
     await Promise.race([
       api.sendSticker({
@@ -178,11 +193,13 @@ export async function sendGifAsImage(
         setTimeout(() => reject(new Error("sendSticker timeout")), STICKER_SEND_TIMEOUT)
       ),
     ]);
+    LOG("sendSticker succeeded!");
     return true;
-  } catch (stickerErr) {
-    console.warn("sendSticker failed, falling back to m.room.message:", stickerErr);
+  } catch (stickerErr: unknown) {
+    LOG("sendSticker failed, falling back to m.room.message:", stickerErr);
   }
 
+  LOG("Trying sendRoomEvent m.room.message fallback");
   try {
     await api.sendRoomEvent("m.room.message", {
       msgtype: "m.image",
@@ -190,9 +207,10 @@ export async function sendGifAsImage(
       url: stickerContent.url,
       info: stickerContent.info,
     });
+    LOG("sendRoomEvent succeeded!");
     return true;
-  } catch (msgErr) {
-    console.error("All send methods failed:", msgErr);
+  } catch (msgErr: unknown) {
+    LOG("All send methods failed:", msgErr);
     return false;
   }
 }
