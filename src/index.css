@@ -36,7 +36,8 @@ body {
   background: var(--gif-bg);
   color: var(--gif-text);
   -webkit-font-smoothing: antialiased;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 #root {

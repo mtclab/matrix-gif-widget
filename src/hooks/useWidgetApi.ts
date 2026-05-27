@@ -97,15 +97,13 @@ export function useWidgetApi(): WidgetApiState {
       widget.on(`action:${WidgetApiToWidgetAction.TakeScreenshot}`, handleGenericAction);
 
       widget.start();
-      widget.sendContentLoaded();
-
-      const sendHeight = () => {
-        widget.setAlwaysOnScreen(true);
-      };
-      const ro = new ResizeObserver(sendHeight);
-      ro.observe(document.documentElement);
 
       dispatch({ type: "INIT", api: widget, userId: urlParams.userId, roomId: urlParams.roomId });
+
+      requestAnimationFrame(() => {
+        widget.sendContentLoaded();
+        widget.setAlwaysOnScreen(true);
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to initialize Widget API";
       if (mountedRef.current) dispatch({ type: "ERROR", error: msg });
