@@ -16,6 +16,7 @@ export function GifWidget({ config }: GifWidgetProps) {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<GifResult | null>(null);
   const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -44,16 +45,18 @@ export function GifWidget({ config }: GifWidgetProps) {
   const onSend = useCallback(async () => {
     if (!api || !selected) return;
     setSending(true);
+    setSendError(null);
     try {
-      const sent = await sendGifAsImage(api, selected.full.url, {
+      await sendGifAsImage(api, selected.full.url, {
         width: selected.full.width,
         height: selected.full.height,
         mimeType: "image/gif",
         fileName: selected.title || `gif-${selected.id}.gif`,
       });
-      if (sent) {
-        setSelected(null);
-      }
+      setSelected(null);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to send GIF";
+      setSendError(message);
     } finally {
       setSending(false);
     }
@@ -68,7 +71,7 @@ export function GifWidget({ config }: GifWidgetProps) {
     [selected]
   );
 
-  const error = widgetError || searchError;
+  const error = widgetError || searchError || sendError;
   const themeClass = theme === "dark" ? "theme-dark" : "theme-light";
 
   return (

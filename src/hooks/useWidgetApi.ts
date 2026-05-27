@@ -90,12 +90,16 @@ export function useWidgetApi(): WidgetApiState {
 
   useEffect(() => {
     const urlParams = getWidgetUrlParams();
-    // Element substitutes $matrix_widget_id, $matrix_user_id, $matrix_room_id in the widget URL
     LOG("Init — urlParams:", urlParams, "location:", window.location.href);
 
-    const widgetId = urlParams.widgetId || undefined;
-    if (!widgetId) {
-      LOG("WARNING: no widgetId in URL — Element requires $matrix_widget_id placeholder in widget URL");
+    if (!urlParams.widgetId) {
+      const msg =
+        "Widget URL is missing the widgetId parameter. The widget URL template must include " +
+        "$matrix_widget_id (and ideally $matrix_user_id, $matrix_room_id, $theme) so Element " +
+        "can substitute the real values. See README → 'Adding Widget to a Matrix Room'.";
+      LOG("Init error:", msg);
+      if (mountedRef.current) dispatch({ type: "ERROR", error: msg });
+      return;
     }
 
     const rawHandler = (event: MessageEvent) => {
@@ -106,19 +110,24 @@ export function useWidgetApi(): WidgetApiState {
     window.addEventListener("message", rawHandler);
 
     try {
-      const widget = new WidgetApi(widgetId);
+      const widget = new WidgetApi(urlParams.widgetId);
       apiRef.current = widget;
-      LOG("WidgetApi created with widgetId:", widgetId);
+      LOG("WidgetApi created with widgetId:", urlParams.widgetId);
 
-      // Only request capabilities a custom widget can actually get approved
+      // Custom widgets can request m.send.event capabilities. Element will
+      // prompt the user to approve them. We do NOT request StickerpickerCapabilities
+      // or m.sticker — Element only grants those for type: "m.stickerpicker" widgets.
       widget.requestCapabilityToSendMessage("m.image");
       widget.requestCapabilityToSendMessage("m.room.message");
-      LOG("Capabilities requested: m.image, m.room.message");
+      LOG("Capabilities requested: m.send.event:m.image, m.send.event:m.room.message");
 
-      // Handle all toWidget actions Element may send — reply to each one
-      widget.on(`action:${WidgetApiToWidgetAction.UpdateVisibility}`, handleGenericAction);
+      // Register handlers BEFORE start() so we don't miss Element's opening
+      // messages. Every toWidget action we don't specifically handle gets a
+      // generic ack so Element doesn't log "unhandled".
       widget.on(`action:${WidgetApiToWidgetAction.ThemeChange}`, handleThemeChange);
+      widget.on(`action:${WidgetApiToWidgetAction.UpdateVisibility}`, handleGenericAction);
       widget.on(`action:${WidgetApiToWidgetAction.TakeScreenshot}`, handleGenericAction);
+      widget.on(`action:${WidgetApiToWidgetAction.NotifyCapabilities}`, handleGenericAction);
 
       const onReady = () => {
         if (readyFiredRef.current) return;
@@ -126,11 +135,14 @@ export function useWidgetApi(): WidgetApiState {
         LOG("WidgetApi ready event received");
         if (mountedRef.current) dispatch({ type: "READY" });
 
-        requestAnimationFrame(() => {
-          LOG("Sending contentLoaded + alwaysOnScreen");
-          widget.sendContentLoaded().then(() => LOG("contentLoaded acked")).catch((e: unknown) => LOG("contentLoaded failed:", e));
-          widget.setAlwaysOnScreen(true).then((v: boolean) => LOG("alwaysOnScreen result:", v)).catch((e: unknown) => LOG("alwaysOnScreen failed:", e));
-        });
+        widget
+          .sendContentLoaded()
+          .then(() => LOG("contentLoaded acked"))
+          .catch((e: unknown) => LOG("contentLoaded failed:", e));
+        widget
+          .setAlwaysOnScreen(true)
+          .then((v: boolean) => LOG("alwaysOnScreen result:", v))
+          .catch((e: unknown) => LOG("alwaysOnScreen failed:", e));
       };
 
       widget.on("ready", onReady);
@@ -150,16 +162,17 @@ export function useWidgetApi(): WidgetApiState {
       mountedRef.current = false;
       apiRef.current = null;
       window.removeEventListener("message", rawHandler);
-      cleanupWidget?.off(`action:${WidgetApiToWidgetAction.UpdateVisibility}`, handleGenericAction);
       cleanupWidget?.off(`action:${WidgetApiToWidgetAction.ThemeChange}`, handleThemeChange);
+      cleanupWidget?.off(`action:${WidgetApiToWidgetAction.UpdateVisibility}`, handleGenericAction);
       cleanupWidget?.off(`action:${WidgetApiToWidgetAction.TakeScreenshot}`, handleGenericAction);
+      cleanupWidget?.off(`action:${WidgetApiToWidgetAction.NotifyCapabilities}`, handleGenericAction);
     };
   }, [handleThemeChange, handleGenericAction]);
 
   return state;
 }
 
-const SEND_TIMEOUT = 15000;
+const SEND_TIMEOUT_MS = 15000;
 
 const MEDIA_PROXY_BASE = typeof window !== "undefined" ? `${window.location.origin}/media` : "/media";
 
@@ -178,6 +191,15 @@ export function resolveGifUrl(url: string): string {
   return url;
 }
 
+export class SendGifError extends Error {
+  readonly cause?: unknown;
+  constructor(message: string, cause?: unknown) {
+    super(message);
+    this.name = "SendGifError";
+    this.cause = cause;
+  }
+}
+
 export async function sendGifAsImage(
   api: WidgetApi | null,
   gifUrl: string,
@@ -187,15 +209,21 @@ export async function sendGifAsImage(
     mimeType: string;
     fileName: string;
   }
-): Promise<boolean> {
+): Promise<void> {
   if (!api) {
-    LOG("sendGifAsImage: no WidgetApi — cannot send");
-    return false;
+    throw new SendGifError("Widget API not initialized");
   }
 
   LOG("sendGifAsImage: starting with url=", gifUrl, "data=", gifData);
 
-  const stickerContent: { url: string; info: { h: number; w: number; mimetype: string; size?: number } } = {
+  const imageContent: {
+    msgtype: "m.image";
+    body: string;
+    url: string;
+    info: { h: number; w: number; mimetype: string; size?: number };
+  } = {
+    msgtype: "m.image",
+    body: gifData.fileName,
     url: gifUrl,
     info: {
       h: gifData.height,
@@ -204,71 +232,47 @@ export async function sendGifAsImage(
     },
   };
 
-  // Try fetching via media proxy for uploadFile
+  // Try to upload the GIF bytes to the homeserver for an mxc:// URI.
+  // This is the only way images render in E2EE rooms.
   const proxiedUrl = resolveGifUrl(gifUrl);
+  let uploadedMxc: string | null = null;
 
   try {
     const response = await fetch(proxiedUrl);
-    if (response.ok) {
-      const blob = await response.blob();
-      const file = new File([blob], gifData.fileName, { type: gifData.mimeType });
-      stickerContent.info.size = blob.size;
-      LOG("Fetched GIF via proxy, size=", blob.size);
-
-      try {
-        const uploadResponse = await api.uploadFile(file);
-        const mxcUri = uploadResponse?.content_uri;
-        LOG("uploadFile response:", uploadResponse, "mxcUri=", mxcUri);
-        if (mxcUri) {
-          stickerContent.url = mxcUri;
-        }
-      } catch (uploadErr: unknown) {
-        LOG("uploadFile failed (MSC4039 unsupported?), using HTTP URL:", uploadErr);
-      }
+    if (!response.ok) {
+      throw new Error(`proxy fetch returned ${response.status}`);
     }
-  } catch (fetchErr: unknown) {
-    LOG("Proxy fetch failed, trying direct URL:", fetchErr);
-    try {
-      const response = await fetch(gifUrl);
-      if (response.ok) {
-        const blob = await response.blob();
-        const file = new File([blob], gifData.fileName, { type: gifData.mimeType });
-        stickerContent.info.size = blob.size;
-        LOG("Fetched GIF direct, size=", blob.size);
+    const blob = await response.blob();
+    const file = new File([blob], gifData.fileName, { type: gifData.mimeType });
+    imageContent.info.size = blob.size;
+    LOG("Fetched GIF, size=", blob.size, "attempting uploadFile");
 
-        try {
-          const uploadResponse = await api.uploadFile(file);
-          const mxcUri = uploadResponse?.content_uri;
-          if (mxcUri) {
-            stickerContent.url = mxcUri;
-          }
-        } catch (uploadErr: unknown) {
-          LOG("uploadFile failed:", uploadErr);
-        }
-      }
-    } catch (directErr: unknown) {
-      LOG("Direct fetch also failed:", directErr);
-    }
+    const uploadResponse = await api.uploadFile(file);
+    uploadedMxc = uploadResponse?.content_uri ?? null;
+    LOG("uploadFile response:", uploadResponse, "mxcUri=", uploadedMxc);
+  } catch (uploadErr: unknown) {
+    LOG("Upload path failed, will fall back to sending the HTTPS URL:", uploadErr);
   }
 
-  // Send via sendRoomEvent — custom widgets use m.room.message with m.image msgtype
-  LOG("Sending m.room.message with content.url=", stickerContent.url);
+  if (uploadedMxc) {
+    imageContent.url = uploadedMxc;
+  }
+
+  LOG("Sending m.room.message m.image with url=", imageContent.url);
   try {
     await Promise.race([
-      api.sendRoomEvent("m.room.message", {
-        msgtype: "m.image",
-        body: gifData.fileName,
-        url: stickerContent.url,
-        info: stickerContent.info,
-      }),
+      api.sendRoomEvent("m.room.message", imageContent),
       new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("sendRoomEvent timeout")), SEND_TIMEOUT)
+        setTimeout(() => reject(new Error("send timeout")), SEND_TIMEOUT_MS)
       ),
     ]);
-    LOG("sendRoomEvent succeeded!");
-    return true;
-  } catch (err: unknown) {
-    LOG("sendRoomEvent failed:", err);
-    return false;
+    LOG("sendRoomEvent succeeded");
+  } catch (sendErr: unknown) {
+    const reason = sendErr instanceof Error ? sendErr.message : String(sendErr);
+    LOG("sendRoomEvent failed:", sendErr);
+    throw new SendGifError(
+      `Could not send GIF: ${reason}. Element may not have granted the m.send.event:m.image capability — re-add the widget and approve the prompt.`,
+      sendErr
+    );
   }
 }
