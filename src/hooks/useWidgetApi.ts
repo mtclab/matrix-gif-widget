@@ -124,6 +124,8 @@ export function useWidgetApi(): WidgetApiState {
   return state;
 }
 
+const STICKER_SEND_TIMEOUT = 15000;
+
 export async function sendGifAsImage(
   api: WidgetApi | null,
   gifUrl: string,
@@ -136,33 +138,63 @@ export async function sendGifAsImage(
 ): Promise<boolean> {
   if (!api) return false;
 
+  const stickerContent = {
+    url: gifUrl,
+    info: {
+      h: gifData.height,
+      w: gifData.width,
+      mimetype: gifData.mimeType,
+      size: undefined as number | undefined,
+    },
+  };
+
   try {
     const response = await fetch(gifUrl);
-    if (!response.ok) throw new Error(`Failed to fetch GIF: ${response.status}`);
+    if (response.ok) {
+      const blob = await response.blob();
+      const file = new File([blob], gifData.fileName, { type: gifData.mimeType });
+      stickerContent.info.size = blob.size;
 
-    const blob = await response.blob();
-    const file = new File([blob], gifData.fileName, { type: gifData.mimeType });
+      try {
+        const uploadResponse = await api.uploadFile(file);
+        const mxcUri = uploadResponse?.content_uri;
+        if (mxcUri) {
+          stickerContent.url = mxcUri;
+        }
+      } catch (uploadErr) {
+        console.warn("uploadFile failed (MSC4039 unsupported?), using HTTP URL:", uploadErr);
+      }
+    }
+  } catch (fetchErr) {
+    console.warn("Could not fetch GIF for upload, sending HTTP URL:", fetchErr);
+  }
 
-    const uploadResponse = await api.uploadFile(file) as Record<string, unknown>;
-    const mxcUri = (uploadResponse?.content_uri || uploadResponse?.mxc || uploadResponse?.url) as string | undefined;
+  try {
+    await Promise.race([
+      api.sendSticker({
+        name: gifData.fileName,
+        description: gifData.fileName,
+        content: stickerContent,
+      }),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("sendSticker timeout")), STICKER_SEND_TIMEOUT)
+      ),
+    ]);
+    return true;
+  } catch (stickerErr) {
+    console.warn("sendSticker failed, falling back to m.room.message:", stickerErr);
+  }
 
-    if (!mxcUri) throw new Error("No content URI returned from upload");
-
+  try {
     await api.sendRoomEvent("m.room.message", {
       msgtype: "m.image",
       body: gifData.fileName,
-      url: mxcUri,
-      info: {
-        mimetype: gifData.mimeType,
-        w: gifData.width,
-        h: gifData.height,
-        size: blob.size,
-      },
+      url: stickerContent.url,
+      info: stickerContent.info,
     });
-
     return true;
-  } catch (err) {
-    console.error("Failed to send GIF:", err);
+  } catch (msgErr) {
+    console.error("All send methods failed:", msgErr);
     return false;
   }
 }
