@@ -1,0 +1,664 @@
+From 83485e811b6ecc5d06e209a10df47c0961cd2997 Mon Sep 17 00:00:00 2001
+From: claude <claude@example.com>
+Date: Wed, 27 May 2026 18:11:06 +0000
+Subject: [PATCH] fix: make custom widget send flow actually work
+
+- Require widgetId from URL and fail loud if missing, rather than self-declaring
+  ready after 5s. Element substitutes $matrix_widget_id into the widget URL
+  template; without it the WidgetApi transport drops every inbound message and
+  the widget appears connected but is not.
+
+- Drop StickerpickerCapabilities, MatrixCapabilities.Screenshots, and the
+  sendSticker / raw postMessage fallbacks. Element only grants m.sticker to
+  widgets whose state event has type 'm.stickerpicker', so requesting it from a
+  custom widget pollutes the approval prompt for nothing and the sendSticker
+  call is always rejected.
+
+- Request only m.send.event:m.image and m.send.event:m.room.message, the
+  capabilities a custom widget can actually receive. Element prompts the user
+  to approve them.
+
+- Add a NotifyCapabilities handler so Element stops logging 'The postMessage
+  was unhandled' for capability negotiation. Register all handlers before
+  start() so we don't miss Element's opening messages.
+
+- sendGifAsImage now throws SendGifError on failure instead of returning a
+  boolean. The UI was previously displaying a preview-cleared 'success' state
+  for sends that silently failed; it now surfaces the real error.
+
+- Document the required URL template placeholders ($matrix_widget_id,
+  $matrix_user_id, $matrix_room_id, $theme) in the README, and the capability
+  approval prompt the user must accept.
+
+Refs: #2
+---
+ README.md                        |  34 ++++-
+ src/components/GifWidget.tsx     |  13 +-
+ src/hooks/useWidgetApi.ts        | 236 ++++++++++++-------------------
+ tests/hooks/useWidgetApi.test.ts | 115 ++++++++-------
+ 4 files changed, 188 insertions(+), 210 deletions(-)
+
+diff --git a/README.md b/README.md
+index d19f61c..592362f 100644
+--- a/README.md
++++ b/README.md
+@@ -122,14 +122,21 @@ GIPHY_API_KEY=your-giphy-key
+ 
+ ### Widget URL Examples
+ 
++> **Important:** when adding the widget through Element (or any client that uses
++> the [matrix-widget-api](https://github.com/matrix-org/matrix-widget-api)
++> templating), the URL **must** contain the placeholders below. Element
++> substitutes them at load time. Without them, the widget has no
++> `widgetId` and the Widget API transport will silently drop every inbound
++> message, leaving the widget stuck on "Connecting…".
++
+ Production (proxy, no key in URL):
+ ```
+-https://gif.your-domain.com/?provider=tenor
++https://gif.your-domain.com/?provider=tenor&widgetId=$matrix_widget_id&userId=$matrix_user_id&roomId=$matrix_room_id&theme=$theme
+ ```
+ 
+ Development (direct API):
+ ```
+-http://localhost:5173/?provider=tenor&apiKey=YOUR_KEY
++http://localhost:5173/?provider=tenor&apiKey=YOUR_KEY&widgetId=$matrix_widget_id&userId=$matrix_user_id&roomId=$matrix_room_id&theme=$theme
+ ```
+ 
+ ## Adding Widget to a Matrix Room
+@@ -137,8 +144,14 @@ http://localhost:5173/?provider=tenor&apiKey=YOUR_KEY
+ ### Element Web
+ 
+ 1. Open a room
+-2. Click the room name → **Settings** → **Integrations**
+-3. Add a custom widget with your deployed widget URL
++2. Click the room name → **Settings** → **Extensions** (or **Integrations** in
++   older builds)
++3. **Add custom**, paste the templated URL above (with all `$matrix_*`
++   placeholders intact — do not pre-substitute them), and submit
++4. **Approve the capability prompt** that appears inside the widget area:
++   "Allow this widget to send messages on your behalf" with `m.image` and
++   `m.room.message`. If you don't see this prompt, the widget cannot send
++   anything; remove and re-add the widget.
+ 
+ ### Via Matrix State Event
+ 
+@@ -149,12 +162,23 @@ http://localhost:5173/?provider=tenor&apiKey=YOUR_KEY
+   "content": {
+     "type": "im.vector.modular.widgets",
+     "name": "GIF Picker",
+-    "url": "https://gif.your-domain.com/?provider=tenor",
++    "url": "https://gif.your-domain.com/?provider=tenor&widgetId=$matrix_widget_id&userId=$matrix_user_id&roomId=$matrix_room_id&theme=$theme",
+     "data": {}
+   }
+ }
+ ```
+ 
++### Capabilities
++
++The widget requests these Widget API capabilities at startup:
++
++- `m.send.event:m.image` — required to send the GIF as an `m.image` message
++- `m.send.event:m.room.message` — same, broader matcher some clients require
++
++Element will prompt the user to approve them. The widget does **not** request
++`m.sticker` or `StickerpickerCapabilities`, since those are only granted to
++widgets whose state event has `type: "m.stickerpicker"`.
++
+ ## Tech Stack
+ 
+ - **Backend**: Express 5 (serves SPA + proxies GIF APIs)
+diff --git a/src/components/GifWidget.tsx b/src/components/GifWidget.tsx
+index c5f66e0..e1de112 100644
+--- a/src/components/GifWidget.tsx
++++ b/src/components/GifWidget.tsx
+@@ -16,6 +16,7 @@ export function GifWidget({ config }: GifWidgetProps) {
+   const [query, setQuery] = useState("");
+   const [selected, setSelected] = useState<GifResult | null>(null);
+   const [sending, setSending] = useState(false);
++  const [sendError, setSendError] = useState<string | null>(null);
+   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+ 
+   useEffect(() => {
+@@ -44,16 +45,18 @@ export function GifWidget({ config }: GifWidgetProps) {
+   const onSend = useCallback(async () => {
+     if (!api || !selected) return;
+     setSending(true);
++    setSendError(null);
+     try {
+-      const sent = await sendGifAsImage(api, selected.full.url, {
++      await sendGifAsImage(api, selected.full.url, {
+         width: selected.full.width,
+         height: selected.full.height,
+         mimeType: "image/gif",
+         fileName: selected.title || `gif-${selected.id}.gif`,
+       });
+-      if (sent) {
+-        setSelected(null);
+-      }
++      setSelected(null);
++    } catch (err) {
++      const message = err instanceof Error ? err.message : "Failed to send GIF";
++      setSendError(message);
+     } finally {
+       setSending(false);
+     }
+@@ -68,7 +71,7 @@ export function GifWidget({ config }: GifWidgetProps) {
+     [selected]
+   );
+ 
+-  const error = widgetError || searchError;
++  const error = widgetError || searchError || sendError;
+   const themeClass = theme === "dark" ? "theme-dark" : "theme-light";
+ 
+   return (
+diff --git a/src/hooks/useWidgetApi.ts b/src/hooks/useWidgetApi.ts
+index fb706e2..7a87693 100644
+--- a/src/hooks/useWidgetApi.ts
++++ b/src/hooks/useWidgetApi.ts
+@@ -1,9 +1,7 @@
+ import { useCallback, useEffect, useReducer, useRef } from "react";
+ import {
+   WidgetApi,
+-  MatrixCapabilities,
+   WidgetApiToWidgetAction,
+-  StickerpickerCapabilities,
+ } from "matrix-widget-api";
+ import type { WidgetConfig } from "../types";
+ 
+@@ -68,8 +66,6 @@ function getWidgetUrlParams(): { userId: string | null; roomId: string | null; w
+ 
+ const LOG = (...args: unknown[]) => console.log("[GIF-Widget]", ...args);
+ 
+-const READY_TIMEOUT_MS = 5000;
+-
+ export function useWidgetApi(): WidgetApiState {
+   const [state, dispatch] = useReducer(reducer, initState);
+   const apiRef = useRef<WidgetApi | null>(null);
+@@ -85,6 +81,9 @@ export function useWidgetApi(): WidgetApiState {
+     if (widget) widget.transport.reply((ev as CustomEvent).detail, {});
+   }, []);
+ 
++  // Generic ack: reply to any toWidget action we don't have specific handling for.
++  // Without this, Element logs "The postMessage was unhandled" for every
++  // notify_capabilities, visibility, language, etc. action it sends us.
+   const handleGenericAction = useCallback((ev: Event) => {
+     ev.preventDefault();
+     const widget = apiRef.current;
+@@ -95,8 +94,15 @@ export function useWidgetApi(): WidgetApiState {
+     const urlParams = getWidgetUrlParams();
+     LOG("Init — urlParams:", urlParams, "location:", window.location.href);
+ 
+-    const initialWidgetId = urlParams.widgetId || undefined;
+-    LOG("Using widgetId from URL:", initialWidgetId);
++    if (!urlParams.widgetId) {
++      const msg =
++        "Widget URL is missing the widgetId parameter. The widget URL template must include " +
++        "$matrix_widget_id (and ideally $matrix_user_id, $matrix_room_id, $theme) so Element " +
++        "can substitute the real values. See README → 'Adding Widget to a Matrix Room'.";
++      LOG("Init error:", msg);
++      if (mountedRef.current) dispatch({ type: "ERROR", error: msg });
++      return;
++    }
+ 
+     // Raw postMessage debug listener — see everything Element sends
+     const rawHandler = (event: MessageEvent) => {
+@@ -107,18 +113,25 @@ export function useWidgetApi(): WidgetApiState {
+     window.addEventListener("message", rawHandler);
+ 
+     try {
+-      const widget = new WidgetApi(initialWidgetId);
++      const widget = new WidgetApi(urlParams.widgetId);
+       apiRef.current = widget;
+-      LOG("WidgetApi created with widgetId:", initialWidgetId);
++      LOG("WidgetApi created with widgetId:", urlParams.widgetId);
+ 
+-      widget.requestCapability(MatrixCapabilities.Screenshots);
+-      widget.requestCapabilities(StickerpickerCapabilities);
++      // Custom widgets can request m.send.event capabilities. Element will
++      // prompt the user to approve them. We deliberately do NOT request
++      // StickerpickerCapabilities or m.sticker — Element only grants those for
++      // widgets whose state event has type: "m.stickerpicker".
+       widget.requestCapabilityToSendMessage("m.image");
+-      LOG("Capabilities requested");
++      widget.requestCapabilityToSendMessage("m.room.message");
++      LOG("Capabilities requested: m.send.event:m.image, m.send.event:m.room.message");
+ 
+-      widget.on(`action:${WidgetApiToWidgetAction.UpdateVisibility}`, handleGenericAction);
++      // Register handlers BEFORE start() so we don't miss Element's opening
++      // messages. Every toWidget action we don't specifically handle gets a
++      // generic ack so Element doesn't log "unhandled".
+       widget.on(`action:${WidgetApiToWidgetAction.ThemeChange}`, handleThemeChange);
++      widget.on(`action:${WidgetApiToWidgetAction.UpdateVisibility}`, handleGenericAction);
+       widget.on(`action:${WidgetApiToWidgetAction.TakeScreenshot}`, handleGenericAction);
++      widget.on(`action:${WidgetApiToWidgetAction.NotifyCapabilities}`, handleGenericAction);
+ 
+       const onReady = () => {
+         if (readyFiredRef.current) return;
+@@ -126,11 +139,10 @@ export function useWidgetApi(): WidgetApiState {
+         LOG("WidgetApi ready event received");
+         if (mountedRef.current) dispatch({ type: "READY" });
+ 
+-        requestAnimationFrame(() => {
+-          LOG("Sending contentLoaded + alwaysOnScreen");
+-          widget.sendContentLoaded().then(() => LOG("contentLoaded acked")).catch((e: unknown) => LOG("contentLoaded failed:", e));
+-          widget.setAlwaysOnScreen(true).then((v: boolean) => LOG("alwaysOnScreen result:", v)).catch((e: unknown) => LOG("alwaysOnScreen failed:", e));
+-        });
++        widget
++          .sendContentLoaded()
++          .then(() => LOG("contentLoaded acked"))
++          .catch((e: unknown) => LOG("contentLoaded failed:", e));
+       };
+ 
+       widget.on("ready", onReady);
+@@ -139,17 +151,6 @@ export function useWidgetApi(): WidgetApiState {
+       LOG("WidgetApi started, waiting for ready event");
+ 
+       dispatch({ type: "INIT", api: widget, userId: urlParams.userId, roomId: urlParams.roomId });
+-
+-      const readyTimer = setTimeout(() => {
+-        if (!readyFiredRef.current) {
+-          LOG("Ready timeout — self-declaring ready (Element may not negotiate capabilities for custom widgets)");
+-          onReady();
+-        }
+-      }, READY_TIMEOUT_MS);
+-
+-      return () => {
+-        clearTimeout(readyTimer);
+-      };
+     } catch (err) {
+       const msg = err instanceof Error ? err.message : "Failed to initialize Widget API";
+       LOG("Init error:", msg);
+@@ -161,16 +162,17 @@ export function useWidgetApi(): WidgetApiState {
+       mountedRef.current = false;
+       apiRef.current = null;
+       window.removeEventListener("message", rawHandler);
+-      cleanupWidget?.off(`action:${WidgetApiToWidgetAction.UpdateVisibility}`, handleGenericAction);
+       cleanupWidget?.off(`action:${WidgetApiToWidgetAction.ThemeChange}`, handleThemeChange);
++      cleanupWidget?.off(`action:${WidgetApiToWidgetAction.UpdateVisibility}`, handleGenericAction);
+       cleanupWidget?.off(`action:${WidgetApiToWidgetAction.TakeScreenshot}`, handleGenericAction);
++      cleanupWidget?.off(`action:${WidgetApiToWidgetAction.NotifyCapabilities}`, handleGenericAction);
+     };
+   }, [handleThemeChange, handleGenericAction]);
+ 
+   return state;
+ }
+ 
+-const STICKER_SEND_TIMEOUT = 15000;
++const SEND_TIMEOUT_MS = 15000;
+ 
+ const MEDIA_PROXY_BASE = typeof window !== "undefined" ? `${window.location.origin}/media` : "/media";
+ 
+@@ -189,6 +191,15 @@ export function resolveGifUrl(url: string): string {
+   return url;
+ }
+ 
++export class SendGifError extends Error {
++  readonly cause?: unknown;
++  constructor(message: string, cause?: unknown) {
++    super(message);
++    this.name = "SendGifError";
++    this.cause = cause;
++  }
++}
++
+ export async function sendGifAsImage(
+   api: WidgetApi | null,
+   gifUrl: string,
+@@ -198,144 +209,75 @@ export async function sendGifAsImage(
+     mimeType: string;
+     fileName: string;
+   }
+-): Promise<boolean> {
+-  if (!api) { LOG("sendGifAsImage: no api"); return false; }
++): Promise<void> {
++  if (!api) {
++    throw new SendGifError("Widget API not initialized");
++  }
+ 
+   LOG("sendGifAsImage: starting with url=", gifUrl, "data=", gifData);
+ 
+-  const stickerContent = {
++  const imageContent: {
++    msgtype: "m.image";
++    body: string;
++    url: string;
++    info: { h: number; w: number; mimetype: string; size?: number };
++  } = {
++    msgtype: "m.image",
++    body: gifData.fileName,
+     url: gifUrl,
+     info: {
+       h: gifData.height,
+       w: gifData.width,
+       mimetype: gifData.mimeType,
+-      size: undefined as number | undefined,
+     },
+   };
+ 
++  // Step 1: fetch the GIF bytes via our media proxy and upload to the
++  // homeserver to get an mxc:// URI. This is the only way the image will
++  // render correctly in E2EE rooms.
+   const proxiedUrl = resolveGifUrl(gifUrl);
++  let uploadedMxc: string | null = null;
+ 
+   try {
+     const response = await fetch(proxiedUrl);
+-    if (response.ok) {
+-      const blob = await response.blob();
+-      const file = new File([blob], gifData.fileName, { type: gifData.mimeType });
+-      stickerContent.info.size = blob.size;
+-      LOG("Fetched GIF via proxy, size=", blob.size, "attempting uploadFile");
+-
+-      try {
+-        const uploadResponse = await api.uploadFile(file);
+-        const mxcUri = uploadResponse?.content_uri;
+-        LOG("uploadFile response:", uploadResponse, "mxcUri=", mxcUri);
+-        if (mxcUri) {
+-          stickerContent.url = mxcUri;
+-        }
+-      } catch (uploadErr: unknown) {
+-        LOG("uploadFile failed (MSC4039 unsupported?), using HTTP URL:", uploadErr);
+-      }
+-    }
+-  } catch (fetchErr: unknown) {
+-    LOG("Could not fetch GIF via proxy, trying direct URL:", fetchErr);
+-    try {
+-      const response = await fetch(gifUrl);
+-      if (response.ok) {
+-        const blob = await response.blob();
+-        const file = new File([blob], gifData.fileName, { type: gifData.mimeType });
+-        stickerContent.info.size = blob.size;
+-        LOG("Fetched GIF direct, size=", blob.size, "attempting uploadFile");
+-
+-        try {
+-          const uploadResponse = await api.uploadFile(file);
+-          const mxcUri = uploadResponse?.content_uri;
+-          LOG("uploadFile response:", uploadResponse, "mxcUri=", mxcUri);
+-          if (mxcUri) {
+-            stickerContent.url = mxcUri;
+-          }
+-        } catch (uploadErr: unknown) {
+-          LOG("uploadFile failed:", uploadErr);
+-        }
+-      }
+-    } catch (directErr: unknown) {
+-      LOG("Could not fetch GIF for upload, sending HTTP URL:", directErr);
++    if (!response.ok) {
++      throw new Error(`proxy fetch returned ${response.status}`);
+     }
++    const blob = await response.blob();
++    const file = new File([blob], gifData.fileName, { type: gifData.mimeType });
++    imageContent.info.size = blob.size;
++    LOG("Fetched GIF, size=", blob.size, "attempting uploadFile");
++
++    const uploadResponse = await api.uploadFile(file);
++    uploadedMxc = uploadResponse?.content_uri ?? null;
++    LOG("uploadFile response:", uploadResponse, "mxcUri=", uploadedMxc);
++  } catch (uploadErr: unknown) {
++    LOG("Upload path failed, will fall back to sending the HTTPS URL:", uploadErr);
++  }
++
++  if (uploadedMxc) {
++    imageContent.url = uploadedMxc;
+   }
+ 
+-  // Try WidgetApi first
+-  LOG("Sending sticker with content.url=", stickerContent.url);
++  // Step 2: send as m.room.message with msgtype m.image. This is what custom
++  // widgets are allowed to send; sendSticker is gated on m.stickerpicker
++  // widget type and would be rejected by Element here.
++  LOG("Sending m.room.message m.image with url=", imageContent.url);
+   try {
+     await Promise.race([
+-      api.sendSticker({
+-        name: gifData.fileName,
+-        description: gifData.fileName,
+-        content: stickerContent,
+-      }),
++      api.sendRoomEvent("m.room.message", imageContent),
+       new Promise<never>((_, reject) =>
+-        setTimeout(() => reject(new Error("sendSticker timeout")), STICKER_SEND_TIMEOUT)
++        setTimeout(() => reject(new Error("send timeout")), SEND_TIMEOUT_MS)
+       ),
+     ]);
+-    LOG("sendSticker succeeded!");
+-    return true;
+-  } catch (stickerErr: unknown) {
+-    LOG("sendSticker failed:", stickerErr);
+-  }
+-
+-  // Fallback: try sendRoomEvent
+-  LOG("Trying sendRoomEvent m.room.message fallback");
+-  try {
+-    await api.sendRoomEvent("m.room.message", {
+-      msgtype: "m.image",
+-      body: gifData.fileName,
+-      url: stickerContent.url,
+-      info: stickerContent.info,
+-    });
+-    LOG("sendRoomEvent succeeded!");
+-    return true;
+-  } catch (msgErr: unknown) {
+-    LOG("sendRoomEvent failed:", msgErr);
++    LOG("sendRoomEvent succeeded");
++  } catch (sendErr: unknown) {
++    const reason =
++      sendErr instanceof Error ? sendErr.message : String(sendErr);
++    LOG("sendRoomEvent failed:", sendErr);
++    throw new SendGifError(
++      `Could not send GIF: ${reason}. Element may not have granted the m.send.event:m.image capability — re-add the widget and approve the prompt.`,
++      sendErr
++    );
+   }
+-
+-  // Final fallback: direct postMessage to Element
+-  LOG("Trying direct postMessage fallback to parent");
+-  try {
+-    const fallbackWidgetId = new URLSearchParams(window.location.search).get("widgetId") || new URLSearchParams(window.location.hash.replace(/^#\/?/, "")).get("widgetId") || "stickerpicker";
+-    LOG("sendGifAsImage: api.widgetId not accessible, using fallback:", fallbackWidgetId);
+-    const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+-
+-    // Try im.vector.action (Element Web custom action)
+-    const stickerAction = {
+-      api: "fromWidget",
+-      widgetId: fallbackWidgetId,
+-      requestId,
+-      action: "m.sticker",
+-      data: {
+-        name: gifData.fileName,
+-        description: gifData.fileName,
+-        content: stickerContent,
+-      },
+-    };
+-
+-    LOG("Sending direct postMessage:", JSON.stringify(stickerAction).slice(0, 300));
+-    window.parent.postMessage(stickerAction, "*");
+-
+-    // Also try the toWidget notify format
+-    const notifyAction = {
+-      api: "toWidget",
+-      widgetId: fallbackWidgetId,
+-      requestId: `req_${Date.now()}_${Math.random().toString(36).slice(2)}_notify`,
+-      action: "m.sticker",
+-      data: {
+-        name: gifData.fileName,
+-        description: gifData.fileName,
+-        content: stickerContent,
+-      },
+-    };
+-    window.parent.postMessage(notifyAction, "*");
+-
+-    // Return true optimistically — we can't confirm delivery via postMessage
+-    LOG("Direct postMessage sent");
+-    return true;
+-  } catch (postMsgErr: unknown) {
+-    LOG("All send methods failed:", postMsgErr);
+-    return false;
+-  }
+-}
+\ No newline at end of file
++}
+diff --git a/tests/hooks/useWidgetApi.test.ts b/tests/hooks/useWidgetApi.test.ts
+index 222f1be..3b5b905 100644
+--- a/tests/hooks/useWidgetApi.test.ts
++++ b/tests/hooks/useWidgetApi.test.ts
+@@ -1,5 +1,5 @@
+ import { describe, it, expect, vi, beforeEach } from 'vitest';
+-import { sendGifAsImage } from '../../src/hooks/useWidgetApi';
++import { sendGifAsImage, SendGifError } from '../../src/hooks/useWidgetApi';
+ 
+ describe('sendGifAsImage', () => {
+   const gifUrl = 'http://example.com/gif.gif';
+@@ -9,86 +9,95 @@ describe('sendGifAsImage', () => {
+     vi.unstubAllGlobals();
+   });
+ 
+-  it('returns false when api is null', async () => {
+-    const ok = await sendGifAsImage(null, gifUrl, gifData);
+-    expect(ok).toBe(false);
++  it('throws SendGifError when api is null', async () => {
++    await expect(sendGifAsImage(null, gifUrl, gifData)).rejects.toBeInstanceOf(SendGifError);
+   });
+ 
+-  it('falls back to sendSticker with HTTP URL when fetch fails', async () => {
+-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('fail')));
+-    const api = {
+-      sendSticker: vi.fn().mockResolvedValue(undefined),
+-      sendRoomEvent: vi.fn().mockResolvedValue(undefined),
+-    } as unknown as Parameters<typeof sendGifAsImage>[0];
+-    const ok = await sendGifAsImage(api, gifUrl, gifData);
+-    expect(ok).toBe(true);
+-    expect(api.sendSticker).toHaveBeenCalledWith(expect.objectContaining({
+-      name: 'cat.gif',
+-      content: expect.objectContaining({ url: gifUrl }),
+-    }));
+-    vi.unstubAllGlobals();
+-  });
+-
+-  it('uses mxc URI when uploadFile succeeds', async () => {
++  it('uploads via uploadFile then sends m.room.message with mxc URI', async () => {
+     const blob = new Blob(['gifdata'], { type: 'image/gif' });
+     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, blob: () => Promise.resolve(blob) }));
+     const api = {
+       uploadFile: vi.fn().mockResolvedValue({ content_uri: 'mxc://server/media' }),
+-      sendSticker: vi.fn().mockResolvedValue(undefined),
+       sendRoomEvent: vi.fn().mockResolvedValue(undefined),
+     } as unknown as Parameters<typeof sendGifAsImage>[0];
+-    const ok = await sendGifAsImage(api, gifUrl, gifData);
+-    expect(ok).toBe(true);
++
++    await sendGifAsImage(api, gifUrl, gifData);
++
+     expect(api.uploadFile).toHaveBeenCalledOnce();
+-    expect(api.sendSticker).toHaveBeenCalledWith(expect.objectContaining({
+-      content: expect.objectContaining({ url: 'mxc://server/media' }),
+-    }));
+-    vi.unstubAllGlobals();
++    expect(api.sendRoomEvent).toHaveBeenCalledWith(
++      'm.room.message',
++      expect.objectContaining({
++        msgtype: 'm.image',
++        url: 'mxc://server/media',
++        body: 'cat.gif',
++        info: expect.objectContaining({
++          w: 128,
++          h: 128,
++          mimetype: 'image/gif',
++        }),
++      })
++    );
+   });
+ 
+-  it('falls back to HTTP URL in sendSticker when uploadFile fails', async () => {
++  it('falls back to HTTPS URL in m.room.message when uploadFile fails', async () => {
+     const blob = new Blob(['gifdata'], { type: 'image/gif' });
+     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, blob: () => Promise.resolve(blob) }));
+     const api = {
+       uploadFile: vi.fn().mockRejectedValue(new Error('MSC4039 unsupported')),
+-      sendSticker: vi.fn().mockResolvedValue(undefined),
+       sendRoomEvent: vi.fn().mockResolvedValue(undefined),
+     } as unknown as Parameters<typeof sendGifAsImage>[0];
+-    const ok = await sendGifAsImage(api, gifUrl, gifData);
+-    expect(ok).toBe(true);
+-    expect(api.sendSticker).toHaveBeenCalledWith(expect.objectContaining({
+-      content: expect.objectContaining({ url: gifUrl }),
+-    }));
+-    vi.unstubAllGlobals();
++
++    await sendGifAsImage(api, gifUrl, gifData);
++
++    expect(api.sendRoomEvent).toHaveBeenCalledWith(
++      'm.room.message',
++      expect.objectContaining({
++        msgtype: 'm.image',
++        url: gifUrl,
++      })
++    );
+   });
+ 
+-  it('falls back to sendRoomEvent when sendSticker fails', async () => {
++  it('falls back to HTTPS URL when proxy fetch fails', async () => {
++    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network down')));
++    const api = {
++      uploadFile: vi.fn(),
++      sendRoomEvent: vi.fn().mockResolvedValue(undefined),
++    } as unknown as Parameters<typeof sendGifAsImage>[0];
++
++    await sendGifAsImage(api, gifUrl, gifData);
++
++    expect(api.uploadFile).not.toHaveBeenCalled();
++    expect(api.sendRoomEvent).toHaveBeenCalledWith(
++      'm.room.message',
++      expect.objectContaining({ url: gifUrl })
++    );
++  });
++
++  it('throws SendGifError when sendRoomEvent fails', async () => {
+     const blob = new Blob(['gifdata'], { type: 'image/gif' });
+     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, blob: () => Promise.resolve(blob) }));
+     const api = {
+       uploadFile: vi.fn().mockResolvedValue({ content_uri: 'mxc://server/media' }),
+-      sendSticker: vi.fn().mockRejectedValue(new Error('sticker not supported')),
+-      sendRoomEvent: vi.fn().mockResolvedValue(undefined),
++      sendRoomEvent: vi.fn().mockRejectedValue(new Error('capability not granted')),
+     } as unknown as Parameters<typeof sendGifAsImage>[0];
+-    const ok = await sendGifAsImage(api, gifUrl, gifData);
+-    expect(ok).toBe(true);
+-    expect(api.sendRoomEvent).toHaveBeenCalledWith('m.room.message', expect.objectContaining({
+-      msgtype: 'm.image',
+-      url: 'mxc://server/media',
+-    }));
+-    vi.unstubAllGlobals();
++
++    await expect(sendGifAsImage(api, gifUrl, gifData)).rejects.toBeInstanceOf(SendGifError);
++    await expect(sendGifAsImage(api, gifUrl, gifData)).rejects.toThrow(/capability not granted/);
+   });
+ 
+-  it('returns false when all methods fail', async () => {
++  it('never calls sendSticker (custom widgets can\'t send stickers)', async () => {
+     const blob = new Blob(['gifdata'], { type: 'image/gif' });
+     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, blob: () => Promise.resolve(blob) }));
++    const sendSticker = vi.fn();
+     const api = {
+-      uploadFile: vi.fn().mockRejectedValue(new Error('fail')),
+-      sendSticker: vi.fn().mockRejectedValue(new Error('fail')),
+-      sendRoomEvent: vi.fn().mockRejectedValue(new Error('fail')),
++      uploadFile: vi.fn().mockResolvedValue({ content_uri: 'mxc://server/media' }),
++      sendRoomEvent: vi.fn().mockResolvedValue(undefined),
++      sendSticker,
+     } as unknown as Parameters<typeof sendGifAsImage>[0];
+-    const ok = await sendGifAsImage(api, gifUrl, gifData);
+-    expect(ok).toBe(false);
+-    vi.unstubAllGlobals();
++
++    await sendGifAsImage(api, gifUrl, gifData);
++
++    expect(sendSticker).not.toHaveBeenCalled();
+   });
+-});
+\ No newline at end of file
++});
+-- 
+2.43.0
+
